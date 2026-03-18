@@ -6,21 +6,19 @@ namespace Tui.Core
     // WindowManager
     // Central hub for the TUI event loop.
     //
-    // Typical usage:
-    //   using (WindowManager mgr = new WindowManager())
-    //   {
-    //       mgr.AddWindow(my_window);
-    //       mgr.OnFrame    += my_update;
-    //       mgr.Run();
-    //   }
+    // Window navigation keybindings:
+    //   F6              focus next window
+    //   Shift+F6        focus previous window
+    //   Alt+RightArrow  focus next window
+    //   Alt+LeftArrow   focus previous window
+    //   Alt+1..9        focus window by visible index
     //
-    // The loop per frame:
-    //   1. Check for terminal resize.
-    //   2. Fire OnFrame for application state updates.
-    //   3. ClearBack and redraw all visible windows in z-order.
-    //   4. Flush changed cells to stdout.
-    //   5. Read one key (non-blocking with FrameDelayMs sleep).
-    //   6. Dispatch key to the focused window.
+    // Widget navigation (handled by Window):
+    //   Tab             next focusable widget in the active window
+    //   Shift+Tab       previous focusable widget
+    //
+    // Global:
+    //   Ctrl+Q / Ctrl+C quit
     // -------------------------------------------------------------------------
     public sealed class WindowManager : System.IDisposable
     {
@@ -71,9 +69,9 @@ namespace Tui.Core
 
         public WindowManager()
         {
-            System.Console.OutputEncoding = System.Text.Encoding.UTF8;
-            System.Console.CursorVisible  = false;
-            System.Console.TreatControlCAsInput = true;
+            System.Console.OutputEncoding        = System.Text.Encoding.UTF8;
+            System.Console.CursorVisible         = false;
+            System.Console.TreatControlCAsInput  = true;
 
             buf_ = new ScreenBuffer(System.Console.WindowWidth, System.Console.WindowHeight);
         }
@@ -257,10 +255,13 @@ namespace Tui.Core
 
         private void dispatch_key_(System.ConsoleKeyInfo key)
         {
-            bool ctrl = (key.Modifiers & System.ConsoleModifiers.Control) != 0;
-            bool alt  = (key.Modifiers & System.ConsoleModifiers.Alt)     != 0;
+            bool ctrl  = (key.Modifiers & System.ConsoleModifiers.Control) != 0;
+            bool alt   = (key.Modifiers & System.ConsoleModifiers.Alt)     != 0;
+            bool shift = (key.Modifiers & System.ConsoleModifiers.Shift)   != 0;
 
-            // Ctrl+Q -- default quit binding
+            // -----------------------------------------------------------------
+            // Ctrl+Q / Ctrl+C -- quit
+            // -----------------------------------------------------------------
             if (ctrl && key.Key == System.ConsoleKey.Q)
             {
                 if (OnUnhandledKey != null)
@@ -271,7 +272,6 @@ namespace Tui.Core
                 return;
             }
 
-            // Ctrl+C -- treat same as Ctrl+Q
             if (ctrl && key.Key == System.ConsoleKey.C)
             {
                 if (OnUnhandledKey != null)
@@ -282,10 +282,43 @@ namespace Tui.Core
                 return;
             }
 
+            // -----------------------------------------------------------------
+            // F6 / Shift+F6 -- cycle focused window forward / backward
+            // -----------------------------------------------------------------
+            if (key.Key == System.ConsoleKey.F6)
+            {
+                if (shift)
+                {
+                    focus_window_prev_();
+                }
+                else
+                {
+                    focus_window_next_();
+                }
+                return;
+            }
+
+            // -----------------------------------------------------------------
+            // Alt+RightArrow / Alt+LeftArrow -- cycle focused window
+            // -----------------------------------------------------------------
+            if (alt && key.Key == System.ConsoleKey.RightArrow)
+            {
+                focus_window_next_();
+                return;
+            }
+
+            if (alt && key.Key == System.ConsoleKey.LeftArrow)
+            {
+                focus_window_prev_();
+                return;
+            }
+
+            // -----------------------------------------------------------------
             // Alt+1 through Alt+9 -- focus window by visible index
+            // -----------------------------------------------------------------
             if (alt && key.KeyChar >= '1' && key.KeyChar <= '9')
             {
-                int target = key.KeyChar - '1';
+                int          target  = key.KeyChar - '1';
                 List<Window> visible = get_visible_windows_();
                 if (target < visible.Count)
                 {
@@ -294,7 +327,9 @@ namespace Tui.Core
                 return;
             }
 
+            // -----------------------------------------------------------------
             // Forward to focused window
+            // -----------------------------------------------------------------
             if (focused_ != null && focused_.Visible)
             {
                 if (focused_.HandleKey(key))
@@ -332,6 +367,61 @@ namespace Tui.Core
             focused_.Focused = true;
             BringToFront(win);
             win.FocusFirst();
+        }
+
+        // ---------------------------------------------------------------------
+        // focus_window_next_ / focus_window_prev_
+        // Cycle focus through the list of visible windows.
+        // ---------------------------------------------------------------------
+        private void focus_window_next_()
+        {
+            List<Window> visible = get_visible_windows_();
+            if (visible.Count == 0)
+            {
+                return;
+            }
+
+            int current = find_focused_index_(visible);
+            int next    = current + 1;
+            if (next >= visible.Count)
+            {
+                next = 0;
+            }
+            focus_window_(visible[next]);
+        }
+
+        private void focus_window_prev_()
+        {
+            List<Window> visible = get_visible_windows_();
+            if (visible.Count == 0)
+            {
+                return;
+            }
+
+            int current = find_focused_index_(visible);
+            int prev    = current - 1;
+            if (prev < 0)
+            {
+                prev = visible.Count - 1;
+            }
+            focus_window_(visible[prev]);
+        }
+
+        // ---------------------------------------------------------------------
+        // find_focused_index_
+        // Returns the index of the currently focused window in the given list,
+        // or 0 if none is found.
+        // ---------------------------------------------------------------------
+        private int find_focused_index_(List<Window> visible)
+        {
+            for (int i = 0; i < visible.Count; i++)
+            {
+                if (visible[i] == focused_)
+                {
+                    return i;
+                }
+            }
+            return 0;
         }
 
         private void focus_topmost_()

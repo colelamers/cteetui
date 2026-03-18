@@ -8,14 +8,14 @@ namespace Tui.Sim
     // =========================================================================
     public enum CellState
     {
-        Dead    = 0,
-        Ember   = 1,    // dying / fading particle
-        AlphaA  = 2,    // species A -- spreads fast, weak
-        AlphaB  = 3,    // species B -- spreads slow, strong
-        AlphaC  = 4,    // species C -- random walker
-        Food    = 5,    // static resource -- consumed by species
-        Spark   = 6,    // brief bright flash on collision
-        Decay   = 7,    // post-collision debris
+        Dead   = 0,
+        Ember  = 1,    // dying / fading particle
+        AlphaA = 2,    // species A -- spreads fast, weak, needs food
+        AlphaB = 3,    // species B -- spreads slow, strong, no food
+        AlphaC = 4,    // species C -- random walker
+        Food   = 5,    // static resource -- consumed by AlphaA
+        Spark  = 6,    // brief bright flash on collision
+        Decay  = 7,    // post-collision debris
     }
 
     // =========================================================================
@@ -24,7 +24,7 @@ namespace Tui.Sim
     // =========================================================================
     public struct SimEvent
     {
-        public string Message;
+        public string     Message;
         public Core.Color Color;
     }
 
@@ -40,10 +40,10 @@ namespace Tui.Sim
         public int   PopC         = 0;
         public int   FoodCount    = 0;
         public int   Sparks       = 0;
-        public int   Births       = 0;    // this tick
-        public int   Deaths       = 0;    // this tick
-        public int   Collisions   = 0;    // this tick
-        public float Entropy      = 0f;   // measure of grid disorder
+        public int   Births       = 0;      // this tick
+        public int   Deaths       = 0;      // this tick
+        public int   Collisions   = 0;      // this tick
+        public float Entropy      = 0f;     // measure of grid disorder
         public int   PeakPop      = 0;
         public int   ExtinctCount = 0;
         public int   TotalBirths  = 0;
@@ -54,11 +54,11 @@ namespace Tui.Sim
     // Simulation
     // Double-buffered grid automaton.
     //
-    // Rules summary:
-    //   AlphaA  spreads to Dead neighbours if any Food nearby; dies if isolated
-    //   AlphaB  conquers AlphaA cells; needs no food; dies slowly at edges
+    // Rules:
+    //   AlphaA  spreads to Dead neighbours when food is nearby; dies if starved
+    //   AlphaB  conquers AlphaA cells (spark on collision); no food needed
     //   AlphaC  random-walks one step per tick; leaves Decay behind
-    //   Food    spawns randomly; consumed by adjacent AlphaA
+    //   Food    static; consumed by adjacent AlphaA spread; spawns randomly
     //   Spark   lives exactly 1 tick then becomes Decay
     //   Decay   lives 2 ticks then becomes Dead
     //   Ember   lives 3 ticks then becomes Dead
@@ -69,11 +69,11 @@ namespace Tui.Sim
         // Private state
         // =====================================================================
 
-        private CellState[] grid_front_;
-        private CellState[] grid_back_;
-        private int[]       age_;           // ticks alive per cell
-        private int         width_;
-        private int         height_;
+        private CellState[]   grid_front_;
+        private CellState[]   grid_back_;
+        private int[]         age_;           // ticks this cell has been alive
+        private int           width_;
+        private int           height_;
         private System.Random rng_ = new System.Random();
 
         private Queue<SimEvent> pending_events_ = new Queue<SimEvent>();
@@ -113,13 +113,19 @@ namespace Tui.Sim
 
         public CellState Get(int x, int y)
         {
-            if (x < 0 || x >= width_ || y < 0 || y >= height_) return CellState.Dead;
+            if (x < 0 || x >= width_ || y < 0 || y >= height_)
+            {
+                return CellState.Dead;
+            }
             return grid_front_[y * width_ + x];
         }
 
         public int GetAge(int x, int y)
         {
-            if (x < 0 || x >= width_ || y < 0 || y >= height_) return 0;
+            if (x < 0 || x >= width_ || y < 0 || y >= height_)
+            {
+                return 0;
+            }
             return age_[y * width_ + x];
         }
 
@@ -140,7 +146,7 @@ namespace Tui.Sim
                 spawn_food_();
             }
 
-            // Occasionally inject a new walker
+            // Periodically inject a new walker
             if (stats_.TickCount % 150 == 0)
             {
                 inject_species_c_();
@@ -212,8 +218,8 @@ namespace Tui.Sim
                 grid_back_[i]  = CellState.Dead;
                 age_[i]        = 0;
             }
-            seed_();
             stats_ = new SimStats();
+            seed_();
             emit_event_("RESET   Grid cleared and reseeded", Core.Color.Cyan);
         }
 
@@ -228,14 +234,14 @@ namespace Tui.Sim
 
             switch (current)
             {
-                case CellState.AlphaA:  rule_alpha_a_(x, y, idx); break;
-                case CellState.AlphaB:  rule_alpha_b_(x, y, idx); break;
-                case CellState.AlphaC:  rule_alpha_c_(x, y, idx); break;
-                case CellState.Food:    rule_food_(x, y, idx);    break;
-                case CellState.Spark:   rule_spark_(x, y, idx);   break;
-                case CellState.Decay:   rule_decay_(x, y, idx);   break;
-                case CellState.Ember:   rule_ember_(x, y, idx);   break;
-                case CellState.Dead:    rule_dead_(x, y, idx);    break;
+                case CellState.AlphaA: rule_alpha_a_(x, y, idx); break;
+                case CellState.AlphaB: rule_alpha_b_(x, y, idx); break;
+                case CellState.AlphaC: rule_alpha_c_(x, y, idx); break;
+                case CellState.Food:   rule_food_(x, y, idx);    break;
+                case CellState.Spark:  rule_spark_(x, y, idx);   break;
+                case CellState.Decay:  rule_decay_(x, y, idx);   break;
+                case CellState.Ember:  rule_ember_(x, y, idx);   break;
+                case CellState.Dead:   rule_dead_(x, y, idx);    break;
             }
         }
 
@@ -244,7 +250,6 @@ namespace Tui.Sim
         {
             bool has_food = food_nearby_(x, y, 3);
 
-            // Try to spread to a random empty neighbour
             if (has_food && rng_.Next(3) == 0)
             {
                 int nx, ny;
@@ -256,7 +261,6 @@ namespace Tui.Sim
                 }
             }
 
-            // AlphaA dies if age is high and no food
             if (!has_food && age_[idx] > 20)
             {
                 set_back_(x, y, CellState.Ember);
@@ -271,17 +275,21 @@ namespace Tui.Sim
         // AlphaB -- slow conqueror, turns AlphaA into Sparks, dies at old age
         private void rule_alpha_b_(int x, int y, int idx)
         {
-            // Expand into AlphaA territory (collision = spark)
-            int[] dx = new int[]{ -1, 1, 0, 0, -1, 1, -1, 1 };
-            int[] dy = new int[]{ 0, 0, -1, 1, -1, -1, 1, 1 };
+            int[] dx = new int[] { -1, 1, 0, 0, -1, 1, -1, 1 };
+            int[] dy = new int[] {  0, 0, -1, 1, -1, -1, 1, 1 };
 
             for (int d = 0; d < dx.Length; d++)
             {
                 int nx = x + dx[d];
                 int ny = y + dy[d];
-                if (!in_bounds_(nx, ny)) continue;
+
+                if (!in_bounds_(nx, ny))
+                {
+                    continue;
+                }
 
                 CellState ns = grid_front_[ny * width_ + nx];
+
                 if (ns == CellState.AlphaA && rng_.Next(4) == 0)
                 {
                     set_back_(nx, ny, CellState.Spark);
@@ -295,7 +303,6 @@ namespace Tui.Sim
                 }
             }
 
-            // B dies slowly at old age
             if (age_[idx] > 80 && rng_.Next(6) == 0)
             {
                 set_back_(x, y, CellState.Ember);
@@ -313,31 +320,36 @@ namespace Tui.Sim
             // Leave decay at current position
             set_back_(x, y, CellState.Decay);
 
-            // Move to a random neighbour (prefer empty or food)
-            int[] dx = new int[]{ -1, 1, 0, 0 };
-            int[] dy = new int[]{ 0, 0, -1, 1 };
+            int[] dx = new int[] { -1, 1, 0, 0 };
+            int[] dy = new int[] {  0, 0, -1, 1 };
             int   d  = rng_.Next(4);
             int   nx = x + dx[d];
             int   ny = y + dy[d];
 
-            if (!in_bounds_(nx, ny)) return;
+            if (!in_bounds_(nx, ny))
+            {
+                set_back_(x, y, CellState.AlphaC);
+                return;
+            }
 
             CellState ns = grid_front_[ny * width_ + nx];
 
             if (ns == CellState.Dead || ns == CellState.Food || ns == CellState.Decay)
             {
                 set_back_(nx, ny, CellState.AlphaC);
-                if (ns == CellState.Food) stats_.Births++;   // "fed"
+                if (ns == CellState.Food)
+                {
+                    stats_.Births++;
+                }
             }
             else if (ns == CellState.AlphaA)
             {
                 set_back_(nx, ny, CellState.Spark);
-                set_back_(x, y, CellState.AlphaC);           // stays put
+                set_back_(x, y, CellState.AlphaC);
                 stats_.Collisions++;
             }
             else
             {
-                // Can't move, stay
                 set_back_(x, y, CellState.AlphaC);
             }
         }
@@ -348,7 +360,7 @@ namespace Tui.Sim
             set_back_(x, y, CellState.Food);
         }
 
-        // Spark -- lives 1 tick
+        // Spark -- lives 1 tick then becomes Decay
         private void rule_spark_(int x, int y, int idx)
         {
             set_back_(x, y, CellState.Decay);
@@ -380,10 +392,9 @@ namespace Tui.Sim
             }
         }
 
-        // Dead -- check if should spontaneously become food
+        // Dead -- very rare spontaneous food growth
         private void rule_dead_(int x, int y, int idx)
         {
-            // Very rare spontaneous food growth
             if (rng_.Next(800) == 0)
             {
                 set_back_(x, y, CellState.Food);
@@ -400,7 +411,10 @@ namespace Tui.Sim
 
         private void set_back_(int x, int y, CellState state)
         {
-            if (!in_bounds_(x, y)) return;
+            if (!in_bounds_(x, y))
+            {
+                return;
+            }
             grid_back_[y * width_ + x] = state;
         }
 
@@ -417,8 +431,16 @@ namespace Tui.Sim
                 {
                     int nx = x + dx;
                     int ny = y + dy;
-                    if (!in_bounds_(nx, ny)) continue;
-                    if (grid_front_[ny * width_ + nx] == CellState.Food) return true;
+
+                    if (!in_bounds_(nx, ny))
+                    {
+                        continue;
+                    }
+
+                    if (grid_front_[ny * width_ + nx] == CellState.Food)
+                    {
+                        return true;
+                    }
                 }
             }
             return false;
@@ -426,10 +448,10 @@ namespace Tui.Sim
 
         private bool random_empty_neighbour_(int x, int y, out int nx, out int ny)
         {
-            int[] dx = new int[]{ -1, 1, 0, 0, -1, 1, -1, 1 };
-            int[] dy = new int[]{ 0, 0, -1, 1, -1, -1, 1, 1 };
+            int[] dx = new int[] { -1, 1, 0, 0, -1, 1, -1, 1 };
+            int[] dy = new int[] {  0, 0, -1, 1, -1, -1, 1, 1 };
 
-            // Shuffle
+            // Shuffle direction array
             for (int i = dx.Length - 1; i > 0; i--)
             {
                 int j   = rng_.Next(i + 1);
@@ -441,7 +463,12 @@ namespace Tui.Sim
             {
                 int cx = x + dx[d];
                 int cy = y + dy[d];
-                if (!in_bounds_(cx, cy)) continue;
+
+                if (!in_bounds_(cx, cy))
+                {
+                    continue;
+                }
+
                 if (grid_front_[cy * width_ + cx] == CellState.Dead)
                 {
                     nx = cx;
@@ -449,6 +476,7 @@ namespace Tui.Sim
                     return true;
                 }
             }
+
             nx = x;
             ny = y;
             return false;
@@ -456,13 +484,19 @@ namespace Tui.Sim
 
         private void consume_adjacent_food_(int x, int y)
         {
-            int[] dx = new int[]{ -1, 1, 0, 0 };
-            int[] dy = new int[]{ 0, 0, -1, 1 };
+            int[] dx = new int[] { -1, 1, 0, 0 };
+            int[] dy = new int[] {  0, 0, -1, 1 };
+
             for (int d = 0; d < 4; d++)
             {
                 int nx = x + dx[d];
                 int ny = y + dy[d];
-                if (!in_bounds_(nx, ny)) continue;
+
+                if (!in_bounds_(nx, ny))
+                {
+                    continue;
+                }
+
                 if (grid_front_[ny * width_ + nx] == CellState.Food)
                 {
                     set_back_(nx, ny, CellState.Dead);
@@ -490,7 +524,7 @@ namespace Tui.Sim
                 if (grid_front_[y * width_ + x] == CellState.Dead)
                 {
                     grid_front_[y * width_ + x] = CellState.AlphaC;
-                    emit_event_("INJECT  New walker injected at (" + x + "," + y + ")", Core.Color.Cyan);
+                    emit_event_("INJECT  New walker at (" + x + "," + y + ")", Core.Color.Cyan);
                     return;
                 }
             }
@@ -507,37 +541,51 @@ namespace Tui.Sim
                 grid_front_[idx] = CellState.Food;
             }
 
-            // Seed species A in a cluster
+            // Seed species A in a central cluster
             int ax = rng_.Next(width_ / 4, width_ * 3 / 4);
             int ay = rng_.Next(height_ / 4, height_ * 3 / 4);
             for (int i = 0; i < 12; i++)
             {
                 int x = ax + rng_.Next(-4, 5);
                 int y = ay + rng_.Next(-4, 5);
-                if (!in_bounds_(x, y)) continue;
+                if (!in_bounds_(x, y))
+                {
+                    continue;
+                }
                 if (grid_front_[y * width_ + x] == CellState.Dead)
+                {
                     grid_front_[y * width_ + x] = CellState.AlphaA;
+                }
             }
 
-            // Seed species B at edge
+            // Seed species B at the left edge
             int bx = rng_.Next(2, 6);
             int by = rng_.Next(2, height_ - 2);
             for (int i = 0; i < 5; i++)
             {
                 int x = bx + rng_.Next(-2, 3);
                 int y = by + rng_.Next(-2, 3);
-                if (!in_bounds_(x, y)) continue;
+                if (!in_bounds_(x, y))
+                {
+                    continue;
+                }
                 if (grid_front_[y * width_ + x] == CellState.Dead)
+                {
                     grid_front_[y * width_ + x] = CellState.AlphaB;
+                }
             }
 
-            // Seed species C wanderer
+            // Inject a starting walker
             inject_species_c_();
         }
 
         private void update_stats_()
         {
-            int pa = 0, pb = 0, pc = 0, food = 0, sparks = 0;
+            int   pa     = 0;
+            int   pb     = 0;
+            int   pc     = 0;
+            int   food   = 0;
+            int   sparks = 0;
             float entropy = 0f;
 
             for (int i = 0; i < grid_front_.Length; i++)
@@ -552,7 +600,6 @@ namespace Tui.Sim
                 }
             }
 
-            // Simple entropy: ratio of distinct occupied states
             int occupied = pa + pb + pc + food + sparks;
             if (occupied > 0)
             {
@@ -565,12 +612,12 @@ namespace Tui.Sim
                         + shannon_(rf) + shannon_(rs);
             }
 
-            stats_.PopA       = pa;
-            stats_.PopB       = pb;
-            stats_.PopC       = pc;
-            stats_.FoodCount  = food;
-            stats_.Sparks     = sparks;
-            stats_.Entropy    = entropy;
+            stats_.PopA        = pa;
+            stats_.PopB        = pb;
+            stats_.PopC        = pc;
+            stats_.FoodCount   = food;
+            stats_.Sparks      = sparks;
+            stats_.Entropy     = entropy;
             stats_.TotalBirths += stats_.Births;
             stats_.TotalDeaths += stats_.Deaths;
 
@@ -583,7 +630,10 @@ namespace Tui.Sim
 
         private float shannon_(float p)
         {
-            if (p <= 0f) return 0f;
+            if (p <= 0f)
+            {
+                return 0f;
+            }
             return -p * (float)System.Math.Log(p, 2.0);
         }
 
@@ -598,11 +648,13 @@ namespace Tui.Sim
                 stats_.ExtinctCount++;
                 emit_event_("EXTINCT Species-A wiped out at tick " + stats_.TickCount, Core.Color.Red);
             }
+
             if (b_alive_last_ && !b_alive)
             {
                 stats_.ExtinctCount++;
                 emit_event_("EXTINCT Species-B wiped out at tick " + stats_.TickCount, Core.Color.Red);
             }
+
             if (c_alive_last_ && !c_alive)
             {
                 emit_event_("LOST    Walker lost at tick " + stats_.TickCount, Core.Color.Yellow);
@@ -612,6 +664,7 @@ namespace Tui.Sim
             {
                 emit_event_("REVIVE  Species-A re-emerged", Core.Color.Green);
             }
+
             if (!b_alive_last_ && b_alive)
             {
                 emit_event_("REVIVE  Species-B re-emerged", Core.Color.Green);
@@ -624,29 +677,28 @@ namespace Tui.Sim
 
         private void maybe_emit_event_()
         {
-            // Milestone ticks
             if (stats_.TickCount % 500 == 0)
             {
                 emit_event_(
-                    "TICK    " + stats_.TickCount + "  pop=" + (stats_.PopA + stats_.PopB + stats_.PopC)
-                    + "  births=" + stats_.TotalBirths + "  deaths=" + stats_.TotalDeaths,
+                    "TICK    " + stats_.TickCount
+                    + "  pop=" + (stats_.PopA + stats_.PopB + stats_.PopC)
+                    + "  births=" + stats_.TotalBirths
+                    + "  deaths=" + stats_.TotalDeaths,
                     Core.Color.Gray);
             }
 
-            // Population spike
             if (stats_.Births > 12)
             {
                 emit_event_("BLOOM   Birth spike: " + stats_.Births + " this tick", Core.Color.Green);
             }
 
-            // Collision event
             if (stats_.Collisions > 6)
             {
                 emit_event_("CLASH   " + stats_.Collisions + " collisions this tick", Core.Color.Magenta);
             }
 
-            // Peak population record
-            if (stats_.PopA + stats_.PopB + stats_.PopC == stats_.PeakPop && stats_.PeakPop > 0
+            if (stats_.PopA + stats_.PopB + stats_.PopC == stats_.PeakPop
+                && stats_.PeakPop > 0
                 && stats_.TickCount % 100 == 1)
             {
                 emit_event_("PEAK    Population record: " + stats_.PeakPop, Core.Color.Yellow);

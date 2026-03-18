@@ -1,13 +1,19 @@
 using System.Collections.Generic;
 using Tui.Core;
+using Tui.Sim;
 
 // =============================================================================
-// TUI Framework Demo
+// Ecosystem Simulation
+//
+// Three species compete on a live grid.  A log window captures events.
+// Population sparklines track history.  A stats panel shows live metrics.
 //
 // Controls:
-//   Tab / Shift+Tab    cycle widget focus inside the active window
-//   Alt+1 / 2 / 3      switch the focused window
-//   Ctrl+Q             quit
+//   F6 / Shift+F6          cycle windows
+//   Tab / Shift+Tab        cycle widgets in active window
+//   R                      reset simulation
+//   Space                  pause / unpause
+//   Ctrl+Q                 quit
 // =============================================================================
 
 namespace Tui
@@ -15,47 +21,30 @@ namespace Tui
     class Program
     {
         // =====================================================================
-        // Private state (class-level so event handlers can reach it)
+        // Layout constants
         // =====================================================================
 
-        private static WindowManager mgr_ = null;
-        private static LogView       log_ = null;
-        private static TextBox       name_box_ = null;
-        private static TextBox       email_box_ = null;
-        private static Label         status_lbl_ = null;
-        private static ProgressBar   pb1_ = null;
-        private static ProgressBar   pb2_ = null;
-        private static ProgressBar   pb3_ = null;
-        private static System.Random random_ = new System.Random();
-        private static int           frame_ = 0;
+        // Simulation canvas dimensions (terminal cells)
+        private const int k_sim_w_ = 70;
+        private const int k_sim_h_ = 32;
 
-        private static readonly string[] k_log_messages_ = new string[]
-        {
-            "INFO  System started",
-            "INFO  Listening on :8080",
-            "WARN  High memory pressure detected",
-            "INFO  Request GET /api/users 200 OK",
-            "INFO  Request POST /api/data 201 Created",
-            "ERROR Connection timeout after 30s",
-            "INFO  Background job finished",
-            "WARN  Disk usage above 80%",
-            "INFO  Cache invalidated",
-            "INFO  Config reloaded",
-        };
+        // =====================================================================
+        // Private state
+        // =====================================================================
 
-        private static readonly Color[] k_log_colors_ = new Color[]
-        {
-            Color.Cyan,
-            Color.Cyan,
-            Color.Yellow,
-            Color.Gray,
-            Color.Gray,
-            Color.Red,
-            Color.Cyan,
-            Color.Yellow,
-            Color.Gray,
-            Color.Green,
-        };
+        private static WindowManager mgr_       = null;
+        private static LogView       log_       = null;
+        private static Simulation    sim_       = null;
+        private static Sparkline     spark_a_   = null;
+        private static Sparkline     spark_b_   = null;
+        private static Sparkline     spark_c_   = null;
+        private static Label         tick_lbl_  = null;
+        private static Label         pause_lbl_ = null;
+        private static int           frame_     = 0;
+        private static bool          paused_    = false;
+
+        // Advance the simulation this many steps per rendered frame
+        private const int k_ticks_per_frame_ = 2;
 
         // =====================================================================
         // Entry point
@@ -63,17 +52,20 @@ namespace Tui
 
         static void Main()
         {
+            sim_ = new Simulation(k_sim_w_, k_sim_h_);
+
             using (mgr_ = new WindowManager())
             {
-                build_form_window_();
+                mgr_.FrameDelayMs = 32;    // ~30 fps
+
+                build_sim_window_();
+                build_stats_window_();
                 build_log_window_();
-                build_progress_window_();
 
-                mgr_.OnFrame += on_frame_;
+                mgr_.OnFrame        += on_frame_;
+                mgr_.OnUnhandledKey += on_unhandled_key_;
 
-                log_.Append(timestamp_() + " INFO  TUI Framework started",       Color.Cyan);
-                log_.Append(timestamp_() + " INFO  Press Tab to cycle focus",     Color.Gray);
-                log_.Append(timestamp_() + " INFO  Alt+1/2/3 to switch windows",  Color.Gray);
+                seed_log_();
 
                 mgr_.Run();
             }
@@ -83,143 +75,210 @@ namespace Tui
         // Window builders
         // =====================================================================
 
-        private static void build_form_window_()
+        private static void build_sim_window_()
         {
-            Window form_win = new Window(1, 1, 50, 12, "Input Form");
-            form_win.BorderColor = Color.DarkCyan;
-            form_win.FocusedBorderColor = Color.Cyan;
+            // Window tall enough for canvas + 4 rows of sparklines/labels
+            int win_w = k_sim_w_ + 2;
+            int win_h = k_sim_h_ + 2 + 5;
 
-            Label name_label = new Label(1, 1, "Name   :", Color.White, Color.Black);
-            Label email_label = new Label(1, 3, "Email  :", Color.White, Color.Black);
+            Window sim_win = new Window(0, 0, win_w, win_h, "Ecosystem Simulation");
+            sim_win.BorderColor        = Color.DarkGreen;
+            sim_win.FocusedBorderColor = Color.Green;
 
-            name_box_ = new TextBox(10, 1, 30);
-            name_box_.Placeholder = "Enter your name...";
-            name_box_.TabIndex = 0;
+            SimCanvas canvas = new SimCanvas(0, 0, k_sim_w_, k_sim_h_, sim_);
 
-            email_box_ = new TextBox(10, 3, 30);
-            email_box_.Placeholder = "user@example.com";
-            email_box_.TabIndex = 1;
+            // Sparklines sit immediately below the canvas
+            int sl_y = k_sim_h_ + 1;
+            int sl_w = k_sim_w_ - 2;
 
-            status_lbl_ = new Label(1, 5, new string(' ', 46), Color.DarkGray, Color.Black);
+            spark_a_ = new Sparkline(0, sl_y,     sl_w, "A", Color.Green);
+            spark_b_ = new Sparkline(0, sl_y + 1, sl_w, "B", Color.Cyan);
+            spark_c_ = new Sparkline(0, sl_y + 2, sl_w, "C", Color.Yellow);
 
-            Button submit_btn = new Button(10, 7, "Submit", Color.White, Color.DarkGreen);
-            submit_btn.TabIndex = 2;
-            submit_btn.Clicked += on_submit_clicked_;
+            tick_lbl_  = new Label(0, sl_y + 3, new string(' ', k_sim_w_), Color.DarkGray, Color.Black);
+            pause_lbl_ = new Label(k_sim_w_ - 9, sl_y + 3, "         ",   Color.Black,    Color.Black);
 
-            Button clear_btn = new Button(24, 7, "Clear", Color.White, Color.DarkRed);
-            clear_btn.TabIndex = 3;
-            clear_btn.Clicked += on_clear_clicked_;
+            sim_win.Add(canvas);
+            sim_win.Add(spark_a_);
+            sim_win.Add(spark_b_);
+            sim_win.Add(spark_c_);
+            sim_win.Add(tick_lbl_);
+            sim_win.Add(pause_lbl_);
 
-            form_win.Add(name_label);
-            form_win.Add(name_box_);
-            form_win.Add(email_label);
-            form_win.Add(email_box_);
-            form_win.Add(status_lbl_);
-            form_win.Add(submit_btn);
-            form_win.Add(clear_btn);
+            mgr_.AddWindow(sim_win);
+        }
 
-            mgr_.AddWindow(form_win);
+        private static void build_stats_window_()
+        {
+            int left = k_sim_w_ + 2;
+            int w    = 28;
+
+            Window stats_win = new Window(left, 0, w, 22, "Stats");
+            stats_win.BorderColor        = Color.DarkCyan;
+            stats_win.FocusedBorderColor = Color.Cyan;
+
+            StatsPanel pnl = new StatsPanel(0, 0, w - 2, sim_.Stats);
+
+            Button reset_btn = new Button(0, 13, "Reset Sim",  Color.White, Color.DarkRed);
+            reset_btn.TabIndex = 0;
+            reset_btn.Clicked += on_reset_clicked_;
+
+            Button pause_btn = new Button(14, 13, "Pause",     Color.White, Color.DarkBlue);
+            pause_btn.TabIndex = 1;
+            pause_btn.Clicked += on_pause_clicked_;
+
+            Label legend_hdr = new Label(0, 15, "Legend:",                  Color.DarkGray, Color.Black);
+            Label legend_a   = new Label(0, 16, "\u2593 A  fast spreader",  Color.Green,    Color.Black);
+            Label legend_b   = new Label(0, 17, "\u2588 B  conqueror",      Color.Cyan,     Color.Black);
+            Label legend_c   = new Label(0, 18, "\u25cf C  walker",         Color.Yellow,   Color.Black);
+            Label legend_f   = new Label(0, 19, "\u00b7   food",            Color.DarkGreen,Color.Black);
+
+            stats_win.Add(pnl);
+            stats_win.Add(reset_btn);
+            stats_win.Add(pause_btn);
+            stats_win.Add(legend_hdr);
+            stats_win.Add(legend_a);
+            stats_win.Add(legend_b);
+            stats_win.Add(legend_c);
+            stats_win.Add(legend_f);
+
+            mgr_.AddWindow(stats_win);
         }
 
         private static void build_log_window_()
         {
-            Window log_win = new Window(52, 1, 50, 20, "Live Log");
-            log_win.BorderColor = Color.DarkMagenta;
+            int left = k_sim_w_ + 2;
+            int w    = 28;
+            int top  = 22;
+            int h    = k_sim_h_ + 2 + 5 - top;
+
+            Window log_win = new Window(left, top, w, h, "Event Log");
+            log_win.BorderColor        = Color.DarkMagenta;
             log_win.FocusedBorderColor = Color.Magenta;
 
-            log_ = new LogView(0, 0, 48, 15);
+            int log_h = h - 4;
+            if (log_h < 3) log_h = 3;
+
+            log_          = new LogView(0, 0, w - 2, log_h);
             log_.TabIndex = 0;
 
-            Button clear_log_btn = new Button(0, 16, "Clear Log", Color.White, Color.DarkBlue);
-            clear_log_btn.TabIndex = 1;
-            clear_log_btn.Clicked += on_clear_log_clicked_;
+            Button clear_btn = new Button(0, log_h + 1, "Clear", Color.White, Color.DarkBlue);
+            clear_btn.TabIndex = 1;
+            clear_btn.Clicked += on_clear_log_;
 
             log_win.Add(log_);
-            log_win.Add(clear_log_btn);
+            log_win.Add(clear_btn);
 
             mgr_.AddWindow(log_win);
-        }
-
-        private static void build_progress_window_()
-        {
-            Window progress_win = new Window(1, 14, 50, 8, "Progress Bars");
-            progress_win.BorderColor = Color.DarkYellow;
-            progress_win.FocusedBorderColor = Color.Yellow;
-
-            Label cpu_lbl = new Label(1, 0, "CPU  ", Color.Gray, Color.Black);
-            Label mem_lbl = new Label(1, 2, "MEM  ", Color.Gray, Color.Black);
-            Label disk_lbl = new Label(1, 4, "DISK ", Color.Gray, Color.Black);
-
-            pb1_ = new ProgressBar(1, 1, 44, Color.DarkGray);
-            pb1_.FillColor = Color.Green;
-            pb1_.Value = 0.0;
-
-            pb2_ = new ProgressBar(1, 3, 44, Color.DarkGray);
-            pb2_.FillColor = Color.Yellow;
-            pb2_.Value = 0.0;
-
-            pb3_ = new ProgressBar(1, 5, 44, Color.DarkGray);
-            pb3_.FillColor = Color.Red;
-            pb3_.Value = 0.0;
-
-            progress_win.Add(cpu_lbl);
-            progress_win.Add(pb1_);
-            progress_win.Add(mem_lbl);
-            progress_win.Add(pb2_);
-            progress_win.Add(disk_lbl);
-            progress_win.Add(pb3_);
-
-            mgr_.AddWindow(progress_win);
         }
 
         // =====================================================================
         // Event handlers
         // =====================================================================
 
-        private static void on_submit_clicked_()
-        {
-            status_lbl_.Text = "Submitted: " + name_box_.Text + " / " + email_box_.Text;
-            status_lbl_.Foreground = Color.Green;
-        }
-
-        private static void on_clear_clicked_()
-        {
-            name_box_.Text = "";
-            email_box_.Text = "";
-            status_lbl_.Text = "Form cleared.";
-            status_lbl_.Foreground = Color.Yellow;
-        }
-
-        private static void on_clear_log_clicked_()
-        {
-            log_.Clear();
-        }
-
         private static void on_frame_()
         {
             frame_++;
 
-            // Animate progress bars with sine waves
-            pb1_.Value = 0.5  + 0.45 * System.Math.Sin(frame_ * 0.030);
-            pb2_.Value = 0.3  + 0.30 * System.Math.Sin(frame_ * 0.017 + 1.0);
-            pb3_.Value = 0.6  + 0.20 * System.Math.Sin(frame_ * 0.011 + 2.5);
-
-            // Append a log line every ~60 frames
-            if (frame_ % 60 == 0)
+            // Advance simulation
+            if (!paused_)
             {
-                int idx = random_.Next(k_log_messages_.Length);
-                log_.Append(timestamp_() + " " + k_log_messages_[idx], k_log_colors_[idx]);
+                for (int t = 0; t < k_ticks_per_frame_; t++)
+                {
+                    sim_.Tick();
+                }
+            }
+
+            // Drain simulation events into the log
+            List<SimEvent> events = sim_.DrainEvents();
+            for (int i = 0; i < events.Count; i++)
+            {
+                log_.Append(timestamp_() + " " + events[i].Message, events[i].Color);
+            }
+
+            // Update sparklines
+            spark_a_.Append(sim_.Stats.PopA);
+            spark_b_.Append(sim_.Stats.PopB);
+            spark_c_.Append(sim_.Stats.PopC);
+
+            // Update tick label
+            string state_str = paused_ ? "  [PAUSED]" : "";
+            tick_lbl_.Text =
+                  "tick=" + sim_.Stats.TickCount
+                + "  A="  + sim_.Stats.PopA
+                + "  B="  + sim_.Stats.PopB
+                + "  C="  + sim_.Stats.PopC
+                + "  \u00b7=" + sim_.Stats.FoodCount
+                + state_str;
+
+            if (paused_)
+            {
+                pause_lbl_.Text       = " PAUSED  ";
+                pause_lbl_.Foreground = Color.Black;
+                pause_lbl_.Background = Color.Yellow;
+            }
+            else
+            {
+                pause_lbl_.Text       = "         ";
+                pause_lbl_.Background = Color.Black;
             }
 
             mgr_.DrawStatusBar(
-                " Tab=Next widget  Shift+Tab=Prev  Alt+1/2/3=Switch window  Ctrl+Q=Quit",
-                Color.Black,    
+                " F6=Next win  Tab=Next widget  Space=Pause  R=Reset  Ctrl+Q=Quit",
+                Color.Black,
                 Color.DarkCyan);
+        }
+
+        private static void on_unhandled_key_(System.ConsoleKeyInfo key)
+        {
+            if (key.Key == System.ConsoleKey.Spacebar)
+            {
+                on_pause_clicked_();
+                return;
+            }
+            if (key.Key == System.ConsoleKey.R || key.KeyChar == 'r')
+            {
+                on_reset_clicked_();
+                return;
+            }
+        }
+
+        private static void on_reset_clicked_()
+        {
+            sim_.Reset();
+            log_.Append(timestamp_() + " RESET   Simulation restarted", Color.Yellow);
+        }
+
+        private static void on_pause_clicked_()
+        {
+            paused_ = !paused_;
+            if (paused_)
+            {
+                log_.Append(timestamp_() + " PAUSE   Simulation paused",  Color.DarkGray);
+            }
+            else
+            {
+                log_.Append(timestamp_() + " RESUME  Simulation resumed", Color.Gray);
+            }
+        }
+
+        private static void on_clear_log_()
+        {
+            log_.Clear();
         }
 
         // =====================================================================
         // Helpers
         // =====================================================================
+
+        private static void seed_log_()
+        {
+            log_.Append(timestamp_() + " BOOT    Ecosystem started",           Color.Cyan);
+            log_.Append(timestamp_() + " INFO    A  fast spreader (eats food)", Color.Green);
+            log_.Append(timestamp_() + " INFO    B  slow conqueror",            Color.Cyan);
+            log_.Append(timestamp_() + " INFO    C  random walker",             Color.Yellow);
+            log_.Append(timestamp_() + " INFO    Space=pause  R=reset",         Color.DarkGray);
+        }
 
         private static string timestamp_()
         {
