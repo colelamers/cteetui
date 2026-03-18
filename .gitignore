@@ -1,0 +1,8 @@
+obj
+bin
+.git
+*.xml
+*.json
+*.pdb
+*.exe
+.vscode
